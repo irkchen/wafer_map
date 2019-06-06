@@ -70,7 +70,10 @@ class WaferMapApp(object):
                  plot_range=None,
                  plot_die_centers=False,
                  show_die_gridlines=True,
+                 session="w"
                  ):
+        # session="w" to left click die and right down move to choose area die
+        self.session = session
         self.app = wx.App()
 
         self.wafer_info = wm_info.WaferInfo(die_size,
@@ -99,6 +102,8 @@ class WaferMapApp(object):
                                              size=(600, 500),
                                              plot_die_centers=self.plot_die_centers,
                                              show_die_gridlines=self.show_die_gridlines,
+                                             session=self.session
+
                                              )
 
         self.frame.Show()

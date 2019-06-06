@@ -12,7 +12,6 @@ from __future__ import absolute_import, division, print_function, unicode_litera
 
 # Third-Party
 import wx
-
 # Package / Application
 from . import wm_core
 from . import wm_constants as wm_const
@@ -69,6 +68,7 @@ class WaferMapWindow(wx.Frame):
                  plot_range=None,
                  plot_die_centers=False,
                  show_die_gridlines=True,
+                 session="w"
                  ):
         wx.Frame.__init__(self,
                           None,
@@ -77,6 +77,7 @@ class WaferMapWindow(wx.Frame):
                           size=size,
                           )
         self.xyd = xyd
+        self.session = session
         self.wafer_info = wafer_info
         # backwards compatability
         if isinstance(data_type, str):
@@ -122,6 +123,7 @@ class WaferMapWindow(wx.Frame):
                                                plot_range=self.plot_range,
                                                plot_die_centers=self.plot_die_centers,
                                                show_die_gridlines=self.show_die_gridlines,
+                                               session=self.session,
                                                )
 
     # TODO: There's gotta be a more scalable way to make menu items

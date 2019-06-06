@@ -16,6 +16,7 @@ import numpy as np
 import wx
 from wx.lib.floatcanvas import FloatCanvas
 import wx.lib.colourselect as csel
+import threading
 
 # Package / Application
 from . import wm_legend
@@ -84,6 +85,7 @@ class WaferMapPanel(wx.Panel):
                  discrete_legend_values=None,
                  show_die_gridlines=True,
                  discrete_legend_colors=None,
+                 session="w"
                  ):
         wx.Panel.__init__(self, parent)
 
@@ -91,6 +93,7 @@ class WaferMapPanel(wx.Panel):
         self.parent = parent
         self.xyd = xyd
         self.wafer_info = wafer_info
+        self.session = session
         # backwards compatability
         if isinstance(data_type, str):
             data_type = wm_const.DataType(data_type)
@@ -107,18 +110,19 @@ class WaferMapPanel(wx.Panel):
         self.die_gridlines_bool = show_die_gridlines
 
         ### Other Attributes ################################################
-        self.xyd_dict = xyd_to_dict(self.xyd)      # data duplication!
+        self.xyd_dict = xyd_to_dict(self.xyd)  # data duplication!
         self.drag = False
         self.wfr_outline_bool = True
         self.crosshairs_bool = True
         self.reticle_gridlines_bool = False
         self.legend_bool = True
-
+        self.now = 1  # it is a key to judge Rectangle whether remove
         # timer to give a delay when moving so that buffers aren't
         # re-built too many times.
         # TODO: Convert PyTimer to Timer and wx.EVT_TIMER. See wxPython demo.
         self.move_timer = wx.PyTimer(self.on_move_timer)
         self._init_ui()
+        self.storage_set = set()  # storage choosed die (including: click choose or moving area choose)
 
     ### #--------------------------------------------------------------------
     ### Methods
@@ -138,7 +142,8 @@ class WaferMapPanel(wx.Panel):
         self._create_legend()
 
         # Draw the die and wafer objects (outline, crosshairs, etc) on the canvas
-        self.draw_die()
+        if self.session == "r":     # if session as r (read): draw die
+            self.draw_die()
         if self.plot_die_centers:
             self.draw_die_center()
         self.draw_wafer_objects()
@@ -167,23 +172,28 @@ class WaferMapPanel(wx.Panel):
         for more info.
         """
         # Canvas Events
-        self.canvas.Bind(FloatCanvas.EVT_MOTION, self.on_mouse_move)
+        self.canvas.Bind(FloatCanvas.EVT_LEFT_DOWN, self.recoding_on_mouse_left_down)
+        # self.canvas.Bind(FloatCanvas.EVT_MOTION, self.recoding_on_mouse_move)
+        # self.canvas.Bind(FloatCanvas.EVT_MOTION, self.on_mouse_move)
         self.canvas.Bind(FloatCanvas.EVT_MOUSEWHEEL, self.on_mouse_wheel)
         self.canvas.Bind(FloatCanvas.EVT_MIDDLE_DOWN, self.on_mouse_middle_down)
         self.canvas.Bind(FloatCanvas.EVT_MIDDLE_UP, self.on_mouse_middle_up)
+        self.canvas.Bind(FloatCanvas.EVT_RIGHT_DOWN, self.on_mouse_right_down)
+        self.canvas.Bind(FloatCanvas.EVT_RIGHT_UP, self.on_mouse_right_up)
+
         self.canvas.Bind(wx.EVT_PAINT, self._on_first_paint)
         # XXX: Binding the EVT_LEFT_DOWN seems to cause Issue #24.
         #      What seems to happen is: If I bind EVT_LEFT_DOWN, then the
         #      parent panel or application can't set focus to this
         #      panel, which prevents the EVT_MOUSEWHEEL event from firing
         #      properly.
-#        self.canvas.Bind(wx.EVT_LEFT_DOWN, self.on_mouse_left_down)
-#        self.canvas.Bind(wx.EVT_RIGHT_DOWN, self.on_mouse_right_down)
-#        self.canvas.Bind(wx.EVT_LEFT_UP, self.on_mouse_left_up)
-#        self.canvas.Bind(wx.EVT_KEY_DOWN, self._on_key_down)
+        #        self.canvas.Bind(wx.EVT_LEFT_DOWN, self.on_mouse_left_down)
+        #        self.canvas.Bind(wx.EVT_RIGHT_DOWN, self.on_mouse_right_down)
+        #        self.canvas.Bind(wx.EVT_LEFT_UP, self.on_mouse_left_up)
+        #        self.canvas.Bind(wx.EVT_KEY_DOWN, self._on_key_down)
 
         # This is supposed to fix flicker on mouse move, but it doesn't work.
-#        self.Bind(wx.EVT_ERASE_BACKGROUND, None)
+        #        self.Bind(wx.EVT_ERASE_BACKGROUND, None)
 
         # Panel Events
         self.Bind(csel.EVT_COLOURSELECT, self.on_color_change)
@@ -208,11 +218,11 @@ class WaferMapPanel(wx.Panel):
         else:
             if self.plot_range is None:
                 p_98 = float(wm_utils.nanpercentile([_i[2]
-                                                    for _i
-                                                    in self.xyd], 98))
+                                                     for _i
+                                                     in self.xyd], 98))
                 p_02 = float(wm_utils.nanpercentile([_i[2]
-                                                    for _i
-                                                    in self.xyd], 2))
+                                                     for _i
+                                                     in self.xyd], 2))
 
                 data_min = min([die[2] for die in self.xyd])
                 data_max = max([die[2] for die in self.xyd])
@@ -320,7 +330,7 @@ class WaferMapPanel(wx.Panel):
         """Toggle the legend on and off."""
         if self.legend_bool:
             self.hbox.Remove(0)
-            self.Layout()       # forces update of layout
+            self.Layout()  # forces update of layout
             self.legend_bool = False
         else:
             self.hbox.Insert(0, self.legend, 0)
@@ -353,19 +363,19 @@ class WaferMapPanel(wx.Panel):
             L:      Toggle the legend
         """
         # TODO: Decide if I want to move this to a class attribute
-        keycodes = {wx.WXK_HOME: self.zoom_fill,      # "Home
-                    79: self.toggle_outline,          # "O"
-                    67: self.toggle_crosshairs,       # "C"
-                    76: self.toggle_legend,           # "L"
+        keycodes = {wx.WXK_HOME: self.zoom_fill,  # "Home
+                    79: self.toggle_outline,  # "O"
+                    67: self.toggle_crosshairs,  # "C"
+                    76: self.toggle_legend,  # "L"
                     }
 
-#        print("panel event!")
+        #        print("panel event!")
         key = event.GetKeyCode()
 
         if key in keycodes.keys():
             keycodes[key]()
         else:
-#            print("KeyCode: {}".format(key))
+            #            print("KeyCode: {}".format(key))
             pass
 
     def _on_first_paint(self, event):
@@ -373,7 +383,7 @@ class WaferMapPanel(wx.Panel):
         # disable the handler for future paint events
         self.canvas.Bind(wx.EVT_PAINT, None)
 
-        #TODO: Fix a flicker-type event that occurs on this call
+        # TODO: Fix a flicker-type event that occurs on this call
         self.zoom_fill()
 
     def on_color_change(self, event):
@@ -387,8 +397,9 @@ class WaferMapPanel(wx.Panel):
             self.draw_die_center()
         self.draw_wafer_objects()
         self.canvas.Draw(True)
-#        self.canvas.Unbind(FloatCanvas.EVT_MOUSEWHEEL)
-#        self.canvas.Bind(FloatCanvas.EVT_MOUSEWHEEL, self.on_mouse_wheel)
+
+    #        self.canvas.Unbind(FloatCanvas.EVT_MOUSEWHEEL)
+    #        self.canvas.Bind(FloatCanvas.EVT_MOUSEWHEEL, self.on_mouse_wheel)
 
     def on_move_timer(self, event=None):
         """
@@ -396,7 +407,7 @@ class WaferMapPanel(wx.Panel):
 
         This is needed to prevent buffers from being rebuilt too often.
         """
-#        self.canvas.MoveImage(self.diff_loc, 'Pixel', ReDraw=True)
+        #        self.canvas.MoveImage(self.diff_loc, 'Pixel', ReDraw=True)
         self.canvas.Draw()
 
     def on_mouse_wheel(self, event):
@@ -413,7 +424,7 @@ class WaferMapPanel(wx.Panel):
         #   Allows for zoom acceleration: fast wheel move = large zoom.
         #   factor < 1: zoom out. factor > 1: zoom in
         sign = abs(speed) / speed
-        factor = (abs(speed) * wm_const.wm_ZOOM_FACTOR)**sign
+        factor = (abs(speed) * wm_const.wm_ZOOM_FACTOR) ** sign
 
         # Changes to FloatCanvas.Zoom mean we need to do the following
         # rather than calling the zoom() function.
@@ -421,63 +432,63 @@ class WaferMapPanel(wx.Panel):
         # we can call PixelToWorld(pos) again and get a different value!
         oldpoint = self.canvas.PixelToWorld(pos)
         self.canvas.Scale = self.canvas.Scale * factor
-        self.canvas.SetToNewScale(False)        # sets new scale but no redraw
+        self.canvas.SetToNewScale(False)  # sets new scale but no redraw
         newpoint = self.canvas.PixelToWorld(pos)
         delta = newpoint - oldpoint
         self.canvas.MoveImage(-delta, 'World')  # performs the redraw
 
-    def on_mouse_move(self, event):
-        """Update the status bar with the world coordinates."""
-        # display the mouse coords on the Frame StatusBar
-        parent = wx.GetTopLevelParent(self)
-
-        ds_x, ds_y = self.die_size
-        gc_x, gc_y = self.grid_center
-        dc_x, dc_y = wm_utils.coord_to_grid(event.Coords,
-                                            self.die_size,
-                                            self.grid_center,
-                                            )
-
-        # lookup the die value
-        grid = "x{}y{}"
-        die_grid = grid.format(dc_x, dc_y)
-        try:
-            die_val = self.xyd_dict[die_grid]
-        except KeyError:
-            die_val = "N/A"
-
-        # create the status bar string
-        coord_str = "{x:0.3f}, {y:0.3f}"
-        mouse_coord = "(" + coord_str.format(x=event.Coords[0],
-                                             y=event.Coords[1],
-                                             ) + ")"
-
-        die_radius = math.sqrt((ds_x * (gc_x - dc_x))**2
-                               + (ds_y * (gc_y - dc_y))**2)
-        mouse_radius = math.sqrt(event.Coords[0]**2 + event.Coords[1]**2)
-
-        status_str = "Die {d_grid} :: Radius = {d_rad:0.3f} :: Value = {d_val}   "
-        status_str += "Mouse {m_coord} :: Radius = {m_rad:0.3f}"
-        status_str = status_str.format(d_grid=die_grid,             # grid
-                                       d_val=die_val,               # value
-                                       d_rad=die_radius,            # radius
-                                       m_coord=mouse_coord,         # coord
-                                       m_rad=mouse_radius,          # radius
-                                       )
-        try:
-            parent.SetStatusText(status_str)
-        except:         # TODO: put in exception types.
-            pass
-
-        # If we're dragging, actually move the image.
-        if self.drag:
-            self.end_move_loc = np.array(event.GetPosition())
-            self.diff_loc = self.mid_move_loc - self.end_move_loc
-            self.canvas.MoveImage(self.diff_loc, 'Pixel', ReDraw=True)
-            self.mid_move_loc = self.end_move_loc
-
-            # doesn't appear to do anything...
-            self.move_timer.Start(30, oneShot=True)
+    # def on_mouse_move(self, event):
+    #     """Update the status bar with the world coordinates."""
+    #     # display the mouse coords on the Frame StatusBar
+    #     parent = wx.GetTopLevelParent(self)
+    #
+    #     ds_x, ds_y = self.die_size
+    #     gc_x, gc_y = self.grid_center
+    #     dc_x, dc_y = wm_utils.coord_to_grid(event.Coords,
+    #                                         self.die_size,
+    #                                         self.grid_center,
+    #                                         )
+    #
+    #     # lookup the die value
+    #     grid = "x{}y{}"
+    #     die_grid = grid.format(dc_x, dc_y)
+    #     try:
+    #         die_val = self.xyd_dict[die_grid]
+    #     except KeyError:
+    #         die_val = "N/A"
+    #
+    #     # create the status bar string
+    #     coord_str = "{x:0.3f}, {y:0.3f}"
+    #     mouse_coord = "(" + coord_str.format(x=event.Coords[0],
+    #                                          y=event.Coords[1],
+    #                                          ) + ")"
+    #
+    #     die_radius = math.sqrt((ds_x * (gc_x - dc_x))**2
+    #                            + (ds_y * (gc_y - dc_y))**2)
+    #     mouse_radius = math.sqrt(event.Coords[0]**2 + event.Coords[1]**2)
+    #
+    #     status_str = "Die {d_grid} :: Radius = {d_rad:0.3f} :: Value = {d_val}   "
+    #     status_str += "Mouse {m_coord} :: Radius = {m_rad:0.3f}"
+    #     status_str = status_str.format(d_grid=die_grid,             # grid
+    #                                    d_val=die_val,               # value
+    #                                    d_rad=die_radius,            # radius
+    #                                    m_coord=mouse_coord,         # coord
+    #                                    m_rad=mouse_radius,          # radius
+    #                                    )
+    #     try:
+    #         parent.SetStatusText(status_str)
+    #     except:         # TODO: put in exception types.
+    #         pass
+    #
+    #     # If we're dragging, actually move the image.
+    #     if self.drag:
+    #         self.end_move_loc = np.array(event.GetPosition())
+    #         self.diff_loc = self.mid_move_loc - self.end_move_loc
+    #         self.canvas.MoveImage(self.diff_loc, 'Pixel', ReDraw=True)
+    #         self.mid_move_loc = self.end_move_loc
+    #
+    #         # doesn't appear to do anything...
+    #         self.move_timer.Start(30, oneShot=True)
 
     def on_mouse_middle_down(self, event):
         """Start the drag."""
@@ -507,26 +518,162 @@ class WaferMapPanel(wx.Panel):
 
     def on_mouse_left_down(self, event):
         """Start making the zoom-to-box box."""
-#        print("Left mouse down!")
-#        pcoord = event.GetPosition()
-#        wcoord = self.canvas.PixelToWorld(pcoord)
-#        string = "Pixel Coord = {}    \tWorld Coord = {}"
-#        print(string.format(pcoord, wcoord))
+        #        print("Left mouse down!")
+        #        pcoord = event.GetPosition()
+        #        wcoord = self.canvas.PixelToWorld(pcoord)
+        #        string = "Pixel Coord = {}    \tWorld Coord = {}"
+        #        print(string.format(pcoord, wcoord))
         # TODO: Look into what I was doing here. Why no 'self' on parent?
         parent = wx.GetTopLevelParent(self)
         wx.PostEvent(self.parent, event)
+
+    def recoding_on_mouse_left_down(self, event):
+        parent = wx.GetTopLevelParent(self)
+        ds_x, ds_y = self.die_size
+        gc_x, gc_y = self.grid_center
+        dc_x, dc_y = wm_utils.coord_to_grid(event.Coords,
+                                            self.die_size,
+                                            self.grid_center,
+                                            )
+        if self.data_type == wm_const.DataType.DISCRETE:
+            color_dict = self.legend.color_dict
+            color = color_dict[10]
+        else:
+            color = self.legend.get_color(10)
+        # print("dc_x, dc_y ", dc_x, dc_y)
+        self.storage_set.add((dc_x, dc_y))
+        # Determine the die's lower-left coordinate
+        lower_left_coord = wm_utils.grid_to_rect_coord((dc_x, dc_y),
+                                                       self.die_size,
+                                                       self.grid_center)
+        # print("lower_left_coord", lower_left_coord)
+        self.color = color
+        true_x, true_y = lower_left_coord
+        r1 = math.sqrt(true_x ** 2 + true_y ** 2)  # die to circle (0,0) whether > r
+        if r1 <= self.wafer_info.dia / 2:  # if die in circle
+            # Draw the die on the canvas    # 画点
+            self.canvas.AddRectangle(lower_left_coord,
+                                     self.die_size,
+                                     LineWidth=1,
+                                     FillColor="Green",
+                                     )
+            self.canvas.Draw()
 
     def on_mouse_left_up(self, event):
         """End making the zoom-to-box box and execute the zoom."""
         print("Left mouse up!")
 
     def on_mouse_right_down(self, event):
-        """Start making the zoom-out box."""
+        """Start making the zoom-out box.
+        this function show start moving
+        """
+
+        self.canvas.Bind(FloatCanvas.EVT_MOTION,
+                         self.recoding_on_mouse_move)  # it can serving for right moving when you need choose area
+        self.canvas.Refresh()
+        self.now = 1
+        x, y = wm_utils.coord_to_grid(event.Coords,
+                                      self.die_size,
+                                      self.grid_center,
+                                      )
+        self.abs_x, self.abs_y = x, y
+        print("ringht down now", self.now)
+
+        # print("self.abs_x, self.abs_y", self.abs_x, self.abs_y)
+        self.start_x, self.start_y = wm_utils.grid_to_rect_coord((x, y),
+                                                                 self.die_size,
+                                                                 self.grid_center)
         print("Right mouse down!")
 
     def on_mouse_right_up(self, event):
         """Stop making the zoom-out box and execute the zoom."""
+        # self.canvas.Draw()
+        # self.now = 1
+        print("self.right up now", self.now)
+        """Stop making the zoom-out box and execute the zoom."""
+        self.canvas.Unbind(FloatCanvas.EVT_MOTION)
+        self.canvas.Refresh()
+        abs_x, abs_y = self.abs_x, self.abs_y
+        dc_x, dc_y = self.dc_x, self.dc_y
+        t = threading.Thread(target=self.direction_choose,
+                             args=(dc_x, dc_y))  # direction areas mouse move choose handle
+        t.start()
         print("Right mouse up!")
+
+    def direction_choose(self, dc_x, dc_y):
+        """
+        this function to handle mouse about four kinds of circumstances(top and left, top and right, down and left, down and right)
+        :param dc_x: mouse up die x
+        :param dc_y: mouse up die y
+        :return:
+        """
+        if self.abs_x > dc_x and self.abs_y > dc_y:  # top and left
+            print("top and left")
+
+            start = (self.abs_x - 1, self.abs_y)  # start move position
+            stop = (dc_x, dc_y + 1)  # stop move position
+            for x in range(dc_x, self.abs_x):  # for Rectangle as die
+                for y in range(dc_y + 1, self.abs_y + 1):
+                    self.storage_set.add((x, y))
+        elif self.abs_x > dc_x and self.abs_y < dc_y:  # down and left
+            print("down and left")
+
+            start = (self.abs_x - 1, self.abs_y + 1)
+            stop = (dc_x, dc_y)
+            for x in range(dc_x, self.abs_x):
+                for y in range(self.abs_y + 1, dc_y + 1):
+                    self.storage_set.add((x, y))
+
+        elif self.abs_x < dc_x and self.abs_y > dc_y:  # top and right
+            print("top and right")
+
+            start = (self.abs_x, self.abs_y)
+            stop = (dc_x - 1, dc_y + 1)
+            for x in range(self.abs_x, dc_x):
+                for y in range(dc_y + 1, self.abs_y + 1):
+                    self.storage_set.add((x, y))
+
+        elif self.abs_x < dc_x and self.abs_y < dc_y:  # down and right , this such as else:
+            print("down and right")
+            start = (self.abs_x, self.abs_y + 1)
+            stop = (dc_x - 1, dc_y)
+            for x in range(self.abs_x, dc_x):
+                for y in range(self.abs_y + 1, dc_y + 1):
+                    self.storage_set.add((x, y))
+        print("len(self.storge_set)", len(self.storage_set))  # self.storge_set including total dies(click and move)
+        print("self.storage_set", self.storage_set)  # return die position middle die(0,0)
+
+    def recoding_on_mouse_move(self, event):
+        if self.now != 1:
+            # judge Rectangle whether first draw if first draw, don't remove
+            self.canvas.RemoveObject(self.rect_venv)
+        ds_x, ds_y = self.die_size
+        gc_x, gc_y = self.grid_center
+        dc_x, dc_y = wm_utils.coord_to_grid(event.Coords,
+                                            self.die_size,
+                                            self.grid_center,
+                                            )
+        self.dc_x, self.dc_y = dc_x, dc_y
+        self.now += 1
+
+        goal_x, goal_y = wm_utils.grid_to_rect_coord((dc_x, dc_y),
+                                                     self.die_size,
+                                                     self.grid_center)
+        r1 = math.sqrt(self.start_x ** 2 + self.start_y ** 2)
+        r2 = math.sqrt(self.start_x ** 2 + goal_y ** 2)
+        r3 = math.sqrt(goal_x ** 2 + goal_y ** 2)
+        r4 = math.sqrt(goal_x ** 2 + self.start_y ** 2)
+        # judge whether out of circle if out: not draw
+        if r1 <= self.wafer_info.dia / 2 and r2 <= self.wafer_info.dia / 2 and r3 <= self.wafer_info.dia / 2 and r4 <= self.wafer_info.dia / 2:
+            self.rect_venv = FloatCanvas.Rectangle((self.start_x, self.start_y),
+                                                   (goal_x - self.start_x, goal_y - self.start_y),
+                                                   LineStyle=None, FillColor="Green")
+            self.canvas.AddObject(self.rect_venv)
+            self.draw_wafer_objects()  # move to draw die need redraw grid
+            self.canvas.Draw()
+
+        else:
+            self.canvas.Draw()
 
 
 # ---------------------------------------------------------------------------
@@ -558,7 +705,7 @@ def draw_wafer_outline(dia=150, excl=5, flat=None):
     :class:`wx.lib.floatcanvas.FloatCanvas.Group`
         A ``Group`` that can be added to any floatcanvas.FloatCanvas instance.
     """
-    rad = float(dia)/2.0
+    rad = float(dia) / 2.0
     if flat is None:
         flat = excl
 
@@ -575,8 +722,8 @@ def draw_wafer_outline(dia=150, excl=5, flat=None):
     if dia in wm_const.wm_FLAT_LENGTHS:
         # A flat is defined, so we draw it.
         flat_size = wm_const.wm_FLAT_LENGTHS[dia]
-        x = flat_size/2
-        y = -math.sqrt(rad**2 - x**2)       # Wfr Flat's Y Location
+        x = flat_size / 2
+        y = -math.sqrt(rad ** 2 - x ** 2)  # Wfr Flat's Y Location
 
         arc = FloatCanvas.Arc((x, y),
                               (-x, y),
@@ -599,7 +746,7 @@ def draw_wafer_outline(dia=150, excl=5, flat=None):
                                           )
             excl_group = FloatCanvas.Group([excl_arc])
         else:
-            FSSflatX = math.sqrt(exclRad**2 - FSSflatY**2)
+            FSSflatX = math.sqrt(exclRad ** 2 - FSSflatY ** 2)
 
             # Define the wafer arc
             excl_arc = FloatCanvas.Arc((FSSflatX, FSSflatY),
@@ -747,11 +894,11 @@ def draw_die_gridlines(wf):
     edge = (wf.dia / 2) * 1.05
 
     # calculate the values for the gridlines
-    x_ref = math.modf(wf.center_xy[0])[0] * x_size + (x_size/2)
+    x_ref = math.modf(wf.center_xy[0])[0] * x_size + (x_size / 2)
     pos_vert = np.arange(x_ref, edge, x_size)
     neg_vert = np.arange(x_ref, -edge, -x_size)
 
-    y_ref = math.modf(wf.center_xy[1])[0] * y_size + (y_size/2)
+    y_ref = math.modf(wf.center_xy[1])[0] * y_size + (y_size / 2)
     pos_horiz = np.arange(y_ref, edge, y_size)
     neg_horiz = np.arange(y_ref, -edge, -y_size)
 
@@ -769,8 +916,8 @@ def draw_die_gridlines(wf):
 
 def draw_wafer_flat(rad, flat_length):
     """Draw a wafer flat for a given radius and flat length."""
-    x = flat_length/2
-    y = -math.sqrt(rad**2 - x**2)
+    x = flat_length / 2
+    y = -math.sqrt(rad ** 2 - x ** 2)
 
     flat = FloatCanvas.Line([(-x, y), (x, y)],
                             LineColor=wm_const.wm_WAFER_EDGE_COLOR,
@@ -781,7 +928,7 @@ def draw_wafer_flat(rad, flat_length):
 
 def draw_excl_flat(rad, flat_y, line_width=1, line_color='black'):
     """Draw a wafer flat for a given radius and flat length."""
-    flat_x = math.sqrt(rad**2 - flat_y**2)
+    flat_x = math.sqrt(rad ** 2 - flat_y ** 2)
 
     flat = FloatCanvas.Line([(-flat_x, flat_y), (flat_x, flat_y)],
                             LineColor=wm_const.wm_WAFER_EDGE_COLOR,
@@ -797,7 +944,7 @@ def draw_wafer_notch(rad):
 
     # Define the Notch as a series of 3 (x, y) points
     xy_points = [(-rad * math.sin(ang_rad), -rad * math.cos(ang_rad)),
-                 (0, -rad*0.95),
+                 (0, -rad * 0.95),
                  (rad * math.sin(ang_rad), -rad * math.cos(ang_rad))]
 
     notch = FloatCanvas.Line(xy_points,
